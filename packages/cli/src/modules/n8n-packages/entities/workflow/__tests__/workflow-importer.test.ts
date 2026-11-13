@@ -28,6 +28,7 @@ const makeWorkflow = (id: string): WorkflowEntity =>
 	});
 
 const bindings: PackageImportBindings = {
+	agents: new Map(),
 	credentials: new Map(),
 	workflows: new Map(),
 };
@@ -38,6 +39,7 @@ const context = {
 	projectId: 'project-1',
 	folderId: 'fallback-folder',
 	droppedTagIds: new Set<string>(),
+	publicApi: false,
 } as WorkflowImportContext;
 
 describe('WorkflowImporter.apply', () => {
@@ -72,6 +74,7 @@ describe('WorkflowImporter.apply', () => {
 				parentFolderId: 'folder-1',
 				sourcePublished: false,
 				sourceArchived: false,
+				publishingAction: 'noop',
 			},
 			{
 				action: 'update',
@@ -82,6 +85,7 @@ describe('WorkflowImporter.apply', () => {
 				parentFolderId: null,
 				sourcePublished: false,
 				sourceArchived: false,
+				publishingAction: 'noop',
 			},
 			{
 				action: 'skip',
@@ -91,6 +95,7 @@ describe('WorkflowImporter.apply', () => {
 				parentFolderId: null,
 				sourcePublished: false,
 				sourceArchived: false,
+				publishingAction: 'noop',
 			},
 		] satisfies WorkflowPlanItem[];
 		const plan: WorkflowImportPlan = {
@@ -117,13 +122,18 @@ describe('WorkflowImporter.apply', () => {
 		expect(createWorkflow).toHaveBeenCalledWith(
 			user,
 			expect.any(WorkflowEntity),
-			expect.objectContaining({ batchContext }),
+			expect.objectContaining({ batchContext, publicApi: false }),
 		);
 		expect(updateWorkflow).toHaveBeenCalledWith(
 			user,
 			expect.any(WorkflowEntity),
 			'existing-update',
-			{ publicApi: true, source: 'import', allowArchivedUpdate: false },
+			{
+				publicApi: false,
+				source: 'import',
+				allowArchivedUpdate: false,
+				allowUnresolvedErrorWorkflow: true,
+			},
 		);
 	});
 
@@ -150,6 +160,7 @@ describe('WorkflowImporter.apply', () => {
 					parentFolderId: null,
 					sourcePublished: false,
 					sourceArchived: false,
+					publishingAction: 'noop',
 				},
 			] satisfies WorkflowPlanItem[],
 			conflicts: [],
@@ -220,6 +231,7 @@ describe('WorkflowImporter.apply', () => {
 					parentFolderId: null,
 					sourcePublished: false,
 					sourceArchived: false,
+					publishingAction: 'noop',
 				},
 			],
 			conflicts: [],
@@ -233,6 +245,7 @@ describe('WorkflowImporter.apply', () => {
 		createWorkflow.mockResolvedValue(makeWorkflow('created'));
 
 		await importer.apply(context, plan, {
+			agents: new Map(),
 			credentials: new Map([['source-credential', 'target-credential']]),
 			workflows: new Map(),
 		});
@@ -275,6 +288,7 @@ describe('WorkflowImporter.apply', () => {
 					parentFolderId: null,
 					sourcePublished: false,
 					sourceArchived: true,
+					publishingAction: 'noop',
 				},
 			],
 			conflicts: [],
@@ -288,54 +302,66 @@ describe('WorkflowImporter.apply', () => {
 		const result = await importer.apply(context, plan, bindings);
 
 		expect(update).toHaveBeenCalledWith(user, expect.any(WorkflowEntity), 'existing', {
-			publicApi: true,
+			publicApi: false,
 			source: 'import',
 			allowArchivedUpdate: true,
+			allowUnresolvedErrorWorkflow: true,
 		});
 		expect(archive).not.toHaveBeenCalled();
 		expect(unarchive).not.toHaveBeenCalled();
 		expect(result.outcomes[0]?.workflow).toBe(updated);
 	});
 
-	it('archives only after the content update succeeds', async () => {
-		const update = vi.fn<WorkflowService['update']>();
-		const archive = vi.fn<WorkflowService['archive']>();
-		const workflowService = mock<WorkflowService>({ update, archive });
-		const importer = new WorkflowImporter(
-			mock<WorkflowImportMatchService>(),
-			mock<WorkflowCreationService>(),
-			workflowService,
-			mock<WorkflowFinderService>(),
-		);
-		const existing = Object.assign(makeWorkflow('existing'), { isArchived: false });
-		const archived = Object.assign(makeWorkflow('existing'), { isArchived: true });
-		const plan: WorkflowImportPlan = {
-			items: [
-				{
-					action: 'update',
-					archiveTransition: 'archive',
-					sourceWorkflowId: 'source',
-					entity: Object.assign(makeWorkflow('source'), { isArchived: true }),
-					existing,
-					parentFolderId: null,
-					sourcePublished: false,
-					sourceArchived: true,
-				},
-			],
-			conflicts: [],
-			lineageConflicts: [],
-			idConflicts: [],
-			folderConflicts: [],
-			archiveForbidden: [],
-		};
-		update.mockResolvedValue(existing);
-		archive.mockResolvedValue(archived);
+	it.each([
+		{ transition: 'archive', options: { skipArchived: true, publicApi: 'editor_ui' } },
+		{ transition: 'unarchive', options: { publicApi: 'editor_ui' } },
+	] as const)(
+		'runs $transition only after the content update succeeds',
+		async ({ transition, options }) => {
+			const update = vi.fn<WorkflowService['update']>();
+			const transitionArchive = vi.fn<WorkflowService['archive']>();
+			const workflowService = mock<WorkflowService>({ update, [transition]: transitionArchive });
+			const importer = new WorkflowImporter(
+				mock<WorkflowImportMatchService>(),
+				mock<WorkflowCreationService>(),
+				workflowService,
+				mock<WorkflowFinderService>(),
+			);
+			const archive = transition === 'archive';
+			const existing = Object.assign(makeWorkflow('existing'), { isArchived: !archive });
+			const transitioned = Object.assign(makeWorkflow('existing'), { isArchived: archive });
+			const plan: WorkflowImportPlan = {
+				items: [
+					{
+						action: 'update',
+						archiveTransition: transition,
+						sourceWorkflowId: 'source',
+						entity: Object.assign(makeWorkflow('source'), { isArchived: archive }),
+						existing,
+						parentFolderId: null,
+						sourcePublished: false,
+						sourceArchived: archive,
+						publishingAction: 'noop',
+					},
+				],
+				conflicts: [],
+				lineageConflicts: [],
+				idConflicts: [],
+				folderConflicts: [],
+				archiveForbidden: [],
+			};
+			update.mockResolvedValue(existing);
+			transitionArchive.mockResolvedValue(transitioned);
 
-		const result = await importer.apply(context, plan, bindings);
+			const result = await importer.apply({ ...context, publicApi: 'editor_ui' }, plan, bindings);
 
-		expect(update.mock.invocationCallOrder[0]).toBeLessThan(archive.mock.invocationCallOrder[0]);
-		expect(result.outcomes[0]?.workflow).toBe(archived);
-	});
+			expect(update.mock.invocationCallOrder[0]).toBeLessThan(
+				transitionArchive.mock.invocationCallOrder[0],
+			);
+			expect(transitionArchive).toHaveBeenCalledWith(user, 'existing', options);
+			expect(result.outcomes[0]?.workflow).toBe(transitioned);
+		},
+	);
 
 	it('does not unarchive when the content update fails', async () => {
 		const update = vi.fn<WorkflowService['update']>();
@@ -359,6 +385,7 @@ describe('WorkflowImporter.apply', () => {
 					parentFolderId: null,
 					sourcePublished: false,
 					sourceArchived: false,
+					publishingAction: 'noop',
 				},
 			],
 			conflicts: [],
@@ -404,11 +431,12 @@ describe('WorkflowImporter.plan', () => {
 				},
 			],
 			{
-				workflowConflictPolicy: 'new-version',
-				workflowIdPolicy: 'source',
-				workflowPublishingPolicy: 'preserve-published-state',
+				conflictPolicy: 'new-version',
+				idPolicy: 'source',
+				publishingPolicy: 'preserve-published-state',
 				missingNodeTypeMode: 'fail',
 			},
+			{ checkRootPlacement: false },
 		);
 
 		expect(plan.items[0]).toMatchObject({ action: 'update', archiveTransition: null });
@@ -445,11 +473,12 @@ describe('WorkflowImporter.plan', () => {
 				},
 			],
 			{
-				workflowConflictPolicy: 'new-version',
-				workflowIdPolicy: 'source',
-				workflowPublishingPolicy: 'preserve-published-state',
+				conflictPolicy: 'new-version',
+				idPolicy: 'source',
+				publishingPolicy: 'preserve-published-state',
 				missingNodeTypeMode: 'fail',
 			},
+			{ checkRootPlacement: false },
 		);
 
 		expect(plan.archiveForbidden).toEqual([
@@ -461,5 +490,76 @@ describe('WorkflowImporter.plan', () => {
 				transition: 'archive',
 			},
 		]);
+	});
+	describe('placement of a matched workflow', () => {
+		const options = {
+			conflictPolicy: 'new-version',
+			idPolicy: 'source',
+			publishingPolicy: 'preserve-published-state',
+			missingNodeTypeMode: 'fail',
+		} as const;
+
+		/** The existing workflow sits in `old-folder`. The package puts it in `new-folder`, or at the root. */
+		const planMovedWorkflow = async (
+			layoutConflictPolicy?: 'fail' | 'follow-package',
+			{ toRoot = false } = {},
+		) => {
+			const matchService = mock<WorkflowImportMatchService>();
+			const importer = new WorkflowImporter(
+				matchService,
+				mock<WorkflowCreationService>(),
+				mock<WorkflowService>(),
+				mock<WorkflowFinderService>(),
+			);
+			const existing = Object.assign(makeWorkflow('existing'), {
+				parentFolder: { id: 'old-folder' },
+			});
+			matchService.findBySourceWorkflowIds.mockResolvedValue({
+				matches: new Map([['source', existing]]),
+				lineageConflicts: [],
+			});
+			matchService.findOwningProjectsByWorkflowId.mockResolvedValue(new Map());
+
+			return await importer.plan(
+				toRoot ? { ...context, folderId: null } : context,
+				[
+					{
+						sourceWorkflowId: 'source',
+						entity: makeWorkflow('source'),
+						parentFolderId: toRoot ? null : 'new-folder',
+						sourcePublished: false,
+						sourceArchived: false,
+					},
+				],
+				options,
+				{ checkRootPlacement: toRoot, layoutConflictPolicy },
+			);
+		};
+
+		it('reports a folder conflict by default', async () => {
+			const plan = await planMovedWorkflow();
+
+			expect(plan.folderConflicts).toEqual([
+				expect.objectContaining({
+					existingParentFolderId: 'old-folder',
+					targetFolderId: 'new-folder',
+				}),
+			]);
+			expect(plan.items[0]).not.toHaveProperty('moveToFolderId');
+		});
+
+		it('plans a move to the project root as null', async () => {
+			const plan = await planMovedWorkflow('follow-package', { toRoot: true });
+
+			expect(plan.folderConflicts).toEqual([]);
+			expect(plan.items[0]).toMatchObject({ action: 'update', moveToFolderId: null });
+		});
+
+		it('plans a move under follow-package placement', async () => {
+			const plan = await planMovedWorkflow('follow-package');
+
+			expect(plan.folderConflicts).toEqual([]);
+			expect(plan.items[0]).toMatchObject({ action: 'update', moveToFolderId: 'new-folder' });
+		});
 	});
 });

@@ -40,10 +40,14 @@ import { getResourcePermissions } from '@n8n/permissions';
 import { useDebounceFn } from '@vueuse/core';
 import { useBuilderStore } from '@/features/ai/assistant/builder.store';
 import { useWorkflowId } from '@/app/composables/useWorkflowId';
+import { withoutNewWorkflowQuery } from '@/app/utils/workflowUtils';
 import { useWorkflowSaveStore } from '@/app/stores/workflowSave.store';
 import { useBackendConnectionStore } from '@/app/stores/backendConnection.store';
 import { useSettingsStore } from '@n8n/stores/settings.store';
 import { useInvalidNodeGroupCleanup } from '@/app/composables/useInvalidNodeGroupCleanup';
+import { usePolicyViolationToast } from '@/app/composables/usePolicyViolationToast';
+import { getPolicyViolations } from '@n8n/frontend-module-type-availability-policies';
+import { removeEmptyCanvasGroupsFromWorkflowData } from '@/features/workflows/canvas/emptyGroup.utils';
 
 function getErrorMessage(error: unknown): string {
 	if (error instanceof Error) {
@@ -140,10 +144,28 @@ export function useWorkflowSaving({
 	const settingsStore = useSettingsStore();
 	const workflowId = useWorkflowId();
 	const { removeInvalidNodeGroups } = useInvalidNodeGroupCleanup();
+	const { showPolicyViolationToast, closePolicyViolationToast } = usePolicyViolationToast();
 
-	function showSaveErrorToast(errorMessage: string, retryDelay?: number) {
+	function showSaveErrorToast(
+		error: unknown,
+		errorMessage: string,
+		savedWorkflowId: string,
+		retryDelay?: number,
+	) {
+		const title = i18n.baseText('workflowHelpers.showMessage.title');
+		const violations = getPolicyViolations(error);
+		if (violations) {
+			showPolicyViolationToast(
+				violations,
+				title,
+				'save',
+				createWorkflowDocumentId(savedWorkflowId),
+			);
+			return;
+		}
+
 		toast.showMessage({
-			title: i18n.baseText('workflowHelpers.showMessage.title'),
+			title,
 			message:
 				retryDelay === undefined
 					? errorMessage
@@ -170,12 +192,16 @@ export function useWorkflowSaving({
 		}, retryDelay);
 	}
 
-	function handleAutoSaveFailure(error: unknown, errorMessage: string): false {
+	function handleAutoSaveFailure(
+		error: unknown,
+		errorMessage: string,
+		savedWorkflowId: string,
+	): false {
 		// Handle autosave failures with exponential backoff
 		if (!shouldRetryAutoSaveFailure(error)) {
 			saveStore.resetRetry();
 			saveStore.setLastError(errorMessage);
-			showSaveErrorToast(errorMessage);
+			showSaveErrorToast(error, errorMessage, savedWorkflowId);
 
 			return false;
 		}
@@ -186,7 +212,7 @@ export function useWorkflowSaving({
 		// Schedule retry with exponential backoff
 		const retryDelay = saveStore.getRetryDelay();
 		scheduleAutoSaveRetry(retryDelay);
-		showSaveErrorToast(errorMessage, retryDelay);
+		showSaveErrorToast(error, errorMessage, savedWorkflowId, retryDelay);
 
 		return false;
 	}
@@ -247,7 +273,7 @@ export function useWorkflowSaving({
 
 		// For autosaves, use retry logic so we still communicate autosave stopped working.
 		if (autosaved) {
-			return handleAutoSaveFailure(error, errorMessage);
+			return handleAutoSaveFailure(error, errorMessage, currentWorkflow);
 		}
 
 		return false;
@@ -500,6 +526,7 @@ export function useWorkflowSaving({
 
 				// Reset retry count on successful save
 				saveStore.resetRetry();
+				closePolicyViolationToast('save');
 
 				onSaved?.(false); // Update of existing workflow
 				return true;
@@ -519,10 +546,10 @@ export function useWorkflowSaving({
 				}
 
 				if (autosaved) {
-					return handleAutoSaveFailure(error, errorMessage);
+					return handleAutoSaveFailure(error, errorMessage, currentWorkflow);
 				}
 
-				showSaveErrorToast(errorMessage);
+				showSaveErrorToast(error, errorMessage, currentWorkflow);
 
 				return false;
 			}
@@ -552,6 +579,7 @@ export function useWorkflowSaving({
 			requestNewId,
 			data,
 			autosaved,
+			stripEmptyCanvasGroups = false,
 		}: {
 			name?: string;
 			tags?: string[];
@@ -563,14 +591,16 @@ export function useWorkflowSaving({
 			uiContext?: string;
 			data?: WorkflowDataCreate;
 			autosaved?: boolean;
+			stripEmptyCanvasGroups?: boolean;
 		} = {},
 		redirect = true,
 	): Promise<IWorkflowDb['id'] | null> {
 		let createRequestFailed = false;
+		const currentWorkflowId = workflowId.value;
 
 		try {
 			const currentDocumentStore = useWorkflowDocumentStore(
-				createWorkflowDocumentId(workflowId.value),
+				createWorkflowDocumentId(currentWorkflowId),
 			);
 
 			if (!data) {
@@ -581,6 +611,9 @@ export function useWorkflowSaving({
 			const dirtyCountBeforeSave = uiStore.dirtyStateSetCount;
 
 			const workflowDataRequest: WorkflowDataCreate = data || currentDocumentStore.serialize();
+			if (stripEmptyCanvasGroups) {
+				removeEmptyCanvasGroupsFromWorkflowData(workflowDataRequest);
+			}
 			// A description staged on an unsaved workflow (via the description and
 			// tags modal) is not part of serialize(), so carry it into the first save.
 			if (!data && currentDocumentStore.description) {
@@ -735,7 +768,7 @@ export function useWorkflowSaving({
 				await router.replace({
 					name: route.name,
 					params: { ...route.params },
-					query: { ...route.query, new: undefined },
+					query: withoutNewWorkflowQuery(route.query),
 				});
 			}
 
@@ -747,6 +780,7 @@ export function useWorkflowSaving({
 				if (!autosaved) cancelAutoSave();
 			}
 			void useExternalHooks().run('workflow.afterUpdate', { workflowData });
+			closePolicyViolationToast('save');
 
 			onSaved?.(true); // First save of new workflow
 			return workflowData.id;
@@ -762,7 +796,7 @@ export function useWorkflowSaving({
 				return null;
 			}
 
-			showSaveErrorToast(getErrorMessage(e));
+			showSaveErrorToast(e, getErrorMessage(e), currentWorkflowId);
 
 			return null;
 		}

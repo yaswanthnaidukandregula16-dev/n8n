@@ -10,10 +10,9 @@ import { McpPostSaveMetricsService } from '../mcp-post-save-metrics.service';
 import { createCreateWorkflowFromCodeTool } from '../tools/workflow-builder/create-workflow-from-code.tool';
 
 import { CredentialsService } from '@/credentials/credentials.service';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import { NodeTypes } from '@/node-types';
+import { NotFoundError } from '@n8n/errors';
 import type { AiGatewayService } from '@/services/ai-gateway.service';
-import { UrlService } from '@/services/url.service';
+import { UrlService, NodeTypesProxy } from '@n8n/backend-services';
 import { Telemetry } from '@/telemetry';
 import { WorkflowCreationService } from '@/workflows/workflow-creation.service';
 import { WorkflowFinderService } from '@/workflows/workflow-finder.service';
@@ -101,7 +100,7 @@ describe('create-workflow-from-code MCP tool', () => {
 	let createWorkflowMock: Mock;
 	let urlService: UrlService;
 	let telemetry: Telemetry;
-	let nodeTypes: ReturnType<typeof mockInstance<NodeTypes>>;
+	let nodeTypes: ReturnType<typeof mockInstance<NodeTypesProxy>>;
 	let dataTableOps: DataTableOpsMock;
 
 	beforeEach(() => {
@@ -121,7 +120,7 @@ describe('create-workflow-from-code MCP tool', () => {
 		telemetry = mockInstance(Telemetry, {
 			track: vi.fn(),
 		});
-		nodeTypes = mockInstance(NodeTypes);
+		nodeTypes = mockInstance(NodeTypesProxy);
 		nodeTypes.getByNameAndVersion.mockImplementation(((type: string) => {
 			if (type === '@n8n/n8n-nodes-langchain.agent') {
 				return { description: { group: ['transform'], outputs: [NodeConnectionTypes.Main] } };
@@ -188,6 +187,7 @@ describe('create-workflow-from-code MCP tool', () => {
 			projectRepository,
 			dataTableOps as never,
 			aiGatewayService,
+			{},
 			logger,
 			postSaveMetrics,
 		);

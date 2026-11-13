@@ -1,10 +1,10 @@
 import type { UpdateWorkflowPublicDto, UpdateWorkflowQueryDto } from '@n8n/api-types';
-import type { AuthenticatedRequest } from '@n8n/db';
 import type { Response } from 'express';
 import { mock } from 'vitest-mock-extended';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import { BadRequestError } from '@n8n/errors';
 import { PolicyViolationError } from '@/policy/policy-violation.error';
+import type { PublicApiRequest } from '@/public-api/public-api-client';
 import type { WorkflowService } from '@/workflows/workflow.service';
 
 import { WorkflowsPublicController } from '../workflows.public.controller';
@@ -25,12 +25,13 @@ describe('WorkflowsPublicController', () => {
 			mock(), // globalConfig
 			mock(), // tagService
 			mock(), // redactionEnforcementService
+			mock(), // workflowDependencyQueryService
 		);
 	});
 
 	const updateWorkflow = async () =>
 		await controller.updateWorkflow(
-			mock<AuthenticatedRequest>(),
+			mock<PublicApiRequest>(),
 			mock<Response>(),
 			'workflow-id',
 			mock<UpdateWorkflowPublicDto>(),
